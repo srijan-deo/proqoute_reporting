@@ -49,7 +49,7 @@ substitutions:
   _SERVICE: proquote_reporting
   _DASHBOARD_SERVICE: proquote-dashboard
   _REGION: us-west4
-  _AR_REPO: proquote_reporting
+  _AR_REPO: proquote-reporting
   _IMAGE_NAME: proquote_reporting
   _RUNTIME_SA: cprtqa-stratanalytics-sp1-bq2@cprtqa-strategicanalytics-sp1.iam.gserviceaccount.com
   _GCS_BUCKET: cprtqa-pqai-reporting
