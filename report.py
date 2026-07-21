@@ -1,5 +1,6 @@
 """
-PQ.ai reporting job — BigQuery to Excel only.
+PQ.ai reporting job — BigQuery to Excel, with the template + finished
+workbook stored in Google Cloud Storage.
 
 Usage from main.py:
 
@@ -9,6 +10,7 @@ Usage from main.py:
         job_name="pq_ai_weekly_report",
         current_run_date="2026-07-20",
         key_path="/path/to/service_account.json",
+        gcs_bucket="my-bucket",              # or set GCS_BUCKET_NAME env var
     )
 
 Standalone (CLI) usage is still supported — see the __main__ block at the
@@ -18,6 +20,7 @@ bottom.
 import pandas as pd
 import datetime
 import argparse
+import tempfile
 from operator import itemgetter
 
 import os
@@ -25,6 +28,8 @@ import re
 import zipfile
 import shutil
 from google.cloud import bigquery
+
+from gcs_utils import download_blob_to_file, upload_file_to_blob
 
 pwd = os.path.dirname(os.path.abspath(__file__))
 
@@ -81,17 +86,46 @@ def run_report(
     query_filename="report.sql",
     output_file_type="xlsx",
     keep=30,
+    gcs_bucket=None,
+    gcs_template_blob=None,
+    gcs_reports_prefix=None,
+    upload_to_gcs=True,
 ):
     """
     Runs the PQ.ai report job: pulls BigQuery data and builds the Excel
-    workbook. Returns the path to the saved workbook.
+    workbook. Returns the path to the saved (local) workbook.
 
-    key_path: path to the GCP service-account JSON key, used for BigQuery auth.
+    key_path: path to the GCP service-account JSON key, used for BigQuery
+        (and GCS, unless running on GCP infra with Application Default
+        Credentials — see gcs_utils.py).
     query_filename: name of the .sql file (in the project root) containing
         the labelled query sections.
     output_file_type: extension for the output workbook (e.g. "xlsx").
-    keep: number of old output files to retain when cleaning up.
+    keep: number of old local output files to retain when cleaning up.
+    gcs_bucket: GCS bucket name. Falls back to the GCS_BUCKET_NAME env var
+        if not passed — required, since the template now lives in GCS.
+    gcs_template_blob: blob path of the template workbook in the bucket.
+        Falls back to GCS_TEMPLATE_BLOB env var, default
+        "templates/PQ_ai_Reporting_Reference_Outputs.xlsx".
+    gcs_reports_prefix: blob path prefix to upload finished reports under.
+        Falls back to GCS_REPORTS_PREFIX env var, default
+        "reports/pq_ai_weekly_report/".
+    upload_to_gcs: if True (default), uploads the finished workbook to GCS
+        after building it (so dashboard.py can serve it from there).
     """
+
+    GCS_BUCKET = gcs_bucket or os.environ.get("GCS_BUCKET_NAME")
+    if not GCS_BUCKET:
+        raise RuntimeError(
+            "No GCS bucket configured. Pass gcs_bucket=... or set the "
+            "GCS_BUCKET_NAME environment variable."
+        )
+    GCS_TEMPLATE_BLOB = gcs_template_blob or os.environ.get(
+        "GCS_TEMPLATE_BLOB", "templates/PQ_ai_Reporting_Reference_Outputs.xlsx"
+    )
+    GCS_REPORTS_PREFIX = gcs_reports_prefix or os.environ.get(
+        "GCS_REPORTS_PREFIX", "reports/pq_ai_weekly_report/"
+    )
 
     if not os.path.exists(f'{pwd}/output/{job_name}'):
         os.makedirs(f'{pwd}/output/{job_name}')
@@ -103,7 +137,12 @@ def run_report(
 
     # ── CONFIG ─────────────────────────────────────────────────────────────────
 
-    TEMPLATE_PATH = f'{pwd}/PQ_ai_Reporting_Reference_Outputs.xlsx'
+    # Template now lives in GCS — pull it down to a temp file for this run.
+    _tmp_template = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+    _tmp_template.close()
+    TEMPLATE_PATH = _tmp_template.name
+    download_blob_to_file(GCS_BUCKET, GCS_TEMPLATE_BLOB, TEMPLATE_PATH, key_path=key_path)
+
     SQL_PATH      = f'{pwd}/{query_filename}'
 
     SUMMARY_SHEET  = "PQ.ai Summary"
@@ -359,6 +398,12 @@ def run_report(
         shutil.move(patched_path, output_filename)
         print("Drawing part restored from template.")
 
+    os.remove(TEMPLATE_PATH)  # clean up the downloaded temp template
+
+    if upload_to_gcs:
+        output_blob_name = f"{GCS_REPORTS_PREFIX.rstrip('/')}/{os.path.basename(output_filename)}"
+        upload_file_to_blob(GCS_BUCKET, output_blob_name, output_filename, key_path=key_path)
+
     remove_old_files(f"{pwd}/output/{job_name}", file_type=output_file_type, keep=keep)
     print(f"job {job_name} completed on {datetime.datetime.now()}")
 
@@ -370,11 +415,13 @@ if __name__ == "__main__":
     parser.add_argument("--job_name", default='')
     parser.add_argument("--current_run_date", default='')
     parser.add_argument("--key_path", required=True, help="Path to GCP service-account JSON key")
+    parser.add_argument("--gcs_bucket", default=None, help="GCS bucket name (or set GCS_BUCKET_NAME env var)")
     args = parser.parse_args()
 
     result_path = run_report(
         job_name=args.job_name,
         current_run_date=args.current_run_date,
         key_path=args.key_path,
+        gcs_bucket=args.gcs_bucket,
     )
     print(f"Excel report saved to: {result_path}")
