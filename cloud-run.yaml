@@ -55,3 +55,9 @@ substitutions:
   _GCS_BUCKET: cprtqa-pqai-reporting
   _GCS_TEMPLATE_BLOB: PQ_ai_Reporting_Reference_Outputs.xlsx
   _GCS_REPORTS_PREFIX: reports/pq_ai_weekly_report
+
+# Required because the trigger uses a custom build.service_account —
+# Cloud Build needs to be told explicitly where logs go in that case
+# (it won't default to the legacy Cloud Logging bucket automatically).
+options:
+  logging: CLOUD_LOGGING_ONLY
