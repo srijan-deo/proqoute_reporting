@@ -3,9 +3,11 @@ PQ.ai Performance Dashboard — Flask app.
 
 Reads the latest workbook uploaded to GCS by report.py/main_job.py
 (gs://<bucket>/<reports_prefix>/*.xlsx) and serves an interactive dashboard:
-KPI cards (from the Summary sheet) plus combo bar+line charts per bucket
-table (ACV Bucket, Sale Price Bucket, etc.) from the two Detail sheets,
-mirroring the exact layout report.py writes.
+KPI cards (from the Summary sheet) plus, per bucket table (ACV_Bucket,
+Sale_Price_Bucket, Title_Type_Bucket, AutoGrade_Bucket, Loss_Type_Bucket,
+Lot_Type_Bucket), two side-by-side charts:
+    1. Percent-metrics chart: PQ / PQ_ai Mean Error Pct and MAPE (Cleansed)
+    2. Value-metrics chart: Units Sold and ASP - PQ / PQ_ai (Cleansed)
 
 Usage:
     python dashboard.py
@@ -19,7 +21,7 @@ Config (env vars):
                           Credentials (the runtime service account) is used.
 
 ASSUMPTIONS (verify / adjust to match your actual "Summary (Sheet 1)" query
-columns — I only had report.py's formatting logic + your screenshot to infer
+columns — I only had report.py's formatting logic + your screenshots to infer
 these, not the real column names):
     - Summary sheet has a "breakout" column with values matching the detail
       sheet labels ("BluCar ex-TFSS", "Insurance + TFSS") and a "period"
@@ -29,6 +31,14 @@ these, not the real column names):
     - If your actual column names differ, tweak KPI_CARD_SPECS below —
       the app does a case-insensitive substring match so minor differences
       ("PQai" vs "PQ_ai") are usually fine, but wildly different names won't be.
+    - Detail-sheet "Cleansed" columns (per bucket sub-table) are:
+        "PQ Mean Error Pct - Cleansed", "PQ_ai Mean Error Pct - Cleansed",
+        "PQ MAPE - Cleansed", "PQ_ai MAPE - Cleansed",
+        "Units Sold", "ASP - PQ Cleansed", "ASP - PQ_ai Cleansed"
+      All %-type columns are assumed to be Excel percent-format fractions
+      (e.g. 0.029 -> 2.9%) and are scaled by x100 for display. Worth a
+      spot-check against a raw cell value the first time this runs against
+      real data.
 """
 
 import os
@@ -44,12 +54,38 @@ GCS_BUCKET = os.environ.get("GCS_BUCKET_NAME")
 GCS_REPORTS_PREFIX = os.environ.get("GCS_REPORTS_PREFIX", "reports/pq_ai_weekly_report/")
 KEY_PATH = os.environ.get("BQ_KEY_PATH")  # None on Cloud Run -> uses ADC
 
+# Local-folder fallback: if this directory exists and contains an .xlsx file,
+# use the most recently modified one instead of hitting GCS. Handy for local
+# dev/testing against output/pq_ai_weekly_report/ without needing bucket access.
+# Set LOCAL_REPORTS_DIR="" to force GCS even if the folder exists.
+LOCAL_REPORTS_DIR = os.environ.get(
+    "LOCAL_REPORTS_DIR", os.path.join(pwd, "output", "pq_ai_weekly_report")
+)
+
 SUMMARY_SHEET = "PQ.ai Summary"
 DETAIL_SHEETS = {
     "BluCar ex-TFSS": "BluCar ex-TFSS PQ.ai Detail",
     "Insurance + TFSS": "Insurance + TFSS PQ.ai Detail",
 }
 PERIODS = ["Past Week", "Past Month", "Trailing 3 Months"]
+
+# Fixed column layout for every bucket sub-table in the detail sheets, confirmed
+# directly against the source workbook (columns D, E, G, I, L, N are hidden
+# spacer/raw columns and are intentionally skipped). Column A = period label,
+# column B = bucket value. 1-indexed to match openpyxl's ws.cell(row, col).
+#   C=3: Units Sold          F=6:  ASP - PQ Cleansed
+#   H=8: PQ Mean Error Pct   J=10: PQ MAPE - Cleansed
+#   K=11: ASP - PQ_ai        M=13: PQ_ai Mean Error Pct
+#   O=15: PQ_ai MAPE
+DETAIL_METRIC_COLUMNS = {
+    "units": 3,                  # C — Units Sold
+    "pq_asp": 6,                 # F — ASP - PQ Cleansed
+    "pq_mean_error_pct": 8,      # H — PQ Mean Error Pct - Cleansed
+    "pq_mape": 10,                # J — PQ MAPE - Cleansed
+    "pqai_asp": 11,               # K — ASP - PQ_ai Cleansed
+    "pqai_mean_error_pct": 13,   # M — PQ_ai Mean Error Pct - Cleansed
+    "pqai_mape": 15,              # O — PQ_ai MAPE - Cleansed
+}
 
 KPI_CARD_SPECS = [
     ("Units Sold", "units sold", None),
@@ -71,11 +107,39 @@ app = Flask(__name__)
 _cache = {"blob_name": None, "updated": None, "local_path": None}
 
 
+def _find_latest_local_xlsx():
+    """Return path to the most recently modified .xlsx in LOCAL_REPORTS_DIR, or None.
+    Disabled on Cloud Run (K_SERVICE set) so a stray .xlsx accidentally baked into
+    the image can never shadow the real GCS report in production."""
+    if "K_SERVICE" in os.environ:
+        return None
+    if not LOCAL_REPORTS_DIR or not os.path.isdir(LOCAL_REPORTS_DIR):
+        return None
+    candidates = [
+        os.path.join(LOCAL_REPORTS_DIR, f)
+        for f in os.listdir(LOCAL_REPORTS_DIR)
+        if f.lower().endswith(".xlsx") and not f.startswith("~$")
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
 def _fetch_latest_workbook_path():
+    # Prefer a local file if LOCAL_REPORTS_DIR has one — skips GCS entirely.
+    local_path = _find_latest_local_xlsx()
+    if local_path:
+        mtime = os.path.getmtime(local_path)
+        if _cache["blob_name"] == local_path and _cache["updated"] == mtime and _cache["local_path"]:
+            return _cache["local_path"]
+        _cache.update({"blob_name": local_path, "updated": mtime, "local_path": local_path})
+        return local_path
+
     if not GCS_BUCKET:
         raise RuntimeError(
-            "GCS_BUCKET_NAME is not set. The dashboard needs to know which "
-            "bucket to read reports from."
+            "GCS_BUCKET_NAME is not set and no local report was found in "
+            f"'{LOCAL_REPORTS_DIR}'. The dashboard needs either a local .xlsx "
+            "there or a GCS bucket to read reports from."
         )
 
     blob_name, updated = get_latest_blob_name(GCS_BUCKET, GCS_REPORTS_PREFIX, key_path=KEY_PATH)
@@ -104,6 +168,25 @@ def _find_col(columns, needle):
     return None
 
 
+def _as_pct(val):
+    """Excel percent-format cells store fractions (0.029 -> 2.9%); scale to display %."""
+    if val is None:
+        return None
+    try:
+        return float(val) * 100
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_num(val):
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_summary(ws):
     """Row 1 = headers, rows 2+ = data (matches _update_summary in report.py)."""
     headers = []
@@ -123,15 +206,21 @@ def _parse_summary(ws):
 def _parse_detail_sheet(ws):
     """
     Reverse of _write_sub_table / _update_detail_sheet in report.py:
-    each sub-table is: header row (col B = bucket name, col C.. = metric names),
-    then for each period: a period row (col A only), then data rows
-    (col B = bucket value, col C.. = metric values). A blank row separates tables.
+    each sub-table is: header row (col B = bucket name), then for each
+    period: a period row (col A only), then data rows (col B = bucket
+    value, metric values at the FIXED columns in DETAIL_METRIC_COLUMNS).
+    A blank row separates tables.
 
-    Returns: dict of { bucket_col_name: { period: [ {bucket, metric: val, ...}, ... ] } }
+    NOTE: metric values are read by fixed column index (see
+    DETAIL_METRIC_COLUMNS), not by scanning/matching header text. The sheet
+    has hidden spacer/raw-data columns (D, E, G, I, L, N) interleaved with
+    the "Cleansed" columns we want — a contiguous header scan breaks on
+    those, so we go straight to the known-good column letters instead.
+
+    Returns: dict of { bucket_col_name: { period: [ {bucket, <metric_key>: val, ...}, ... ] } }
     """
     tables = {}
     max_row = ws.max_row
-    max_col = ws.max_column
     row_idx = 3  # data starts at row 3 in detail sheets
 
     while row_idx <= max_row:
@@ -142,16 +231,10 @@ def _parse_detail_sheet(ws):
             row_idx += 1
             continue
 
-        # Header row for a new sub-table
+        # Header row for a new sub-table: col B holds the bucket label
+        # (e.g. "ACV_Bucket"). No need to scan metric headers — columns
+        # are fixed via DETAIL_METRIC_COLUMNS.
         bucket_col = col_b
-        metric_cols = []
-        ci = 3
-        while ci <= max_col:
-            v = ws.cell(row_idx, ci).value
-            if v is None:
-                break
-            metric_cols.append(v)
-            ci += 1
         row_idx += 1
 
         table_data = {p: [] for p in PERIODS}
@@ -172,10 +255,10 @@ def _parse_detail_sheet(ws):
                 row_idx += 1
                 continue
 
-            # data row
+            # data row — read each metric from its fixed column
             entry = {"bucket": col_b}
-            for mi, mc in enumerate(metric_cols):
-                entry[mc] = ws.cell(row_idx, 3 + mi).value
+            for key, col_idx in DETAIL_METRIC_COLUMNS.items():
+                entry[key] = ws.cell(row_idx, col_idx).value
             if current_period is not None:
                 table_data[current_period].append(entry)
             row_idx += 1
@@ -256,6 +339,37 @@ def healthz():
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/debug")
+def api_debug():
+    """
+    TEMPORARY debug route — remove once verified against source workbook.
+    Dumps, for a given sheet/period/bucket, the raw values read from the
+    fixed columns in DETAIL_METRIC_COLUMNS, so you can diff against the
+    source .xlsx directly.
+    Usage: /api/debug?sheet=BluCar ex-TFSS&period=Past Month&bucket=ACV_Bucket
+    """
+    sheet_label = request.args.get("sheet", list(DETAIL_SHEETS.keys())[0])
+    period = request.args.get("period", PERIODS[1])
+    bucket = request.args.get("bucket")
+
+    data = load_dashboard_data()
+    detail = data["detail_data"].get(sheet_label, {})
+
+    if bucket is None:
+        return jsonify({"available_buckets": list(detail.keys())})
+
+    by_period = detail.get(bucket, {})
+    rows = by_period.get(period, [])
+    if not rows:
+        return jsonify({"error": f"No rows for bucket={bucket!r} period={period!r}",
+                         "available_periods": list(by_period.keys())})
+
+    return jsonify({
+        "column_mapping_used": DETAIL_METRIC_COLUMNS,
+        "raw_rows": rows,  # exact bucket + every metric value as read from the fixed columns
+    })
+
+
 @app.route("/api/data")
 def api_data():
     sheet_label = request.args.get("sheet", list(DETAIL_SHEETS.keys())[0])
@@ -274,30 +388,16 @@ def api_data():
         rows = by_period.get(period, [])
         if not rows:
             continue
-        metric_names = [k for k in rows[0].keys() if k != "bucket"]
-        units_col = _find_col(metric_names, "units sold") or _find_col(metric_names, "volume")
-        pq_mae_col = next((m for m in metric_names if m.lower() == "pq mae"), None) or _find_col(
-            [m for m in metric_names if "pq_ai" not in m.lower()], "mae"
-        )
-        pqai_mae_col = _find_col(metric_names, "pq_ai mae") or _find_col(metric_names, "pqai mae")
-        pq_err_col = next((m for m in metric_names if m.lower() == "pq error %"), None) or _find_col(
-            [m for m in metric_names if "pq_ai" not in m.lower()], "error"
-        )
-        pqai_err_col = _find_col(metric_names, "pq_ai error") or _find_col(metric_names, "pqai error")
 
         charts[bucket_col] = {
             "labels": [r["bucket"] for r in rows],
-            "units": [r.get(units_col) for r in rows] if units_col else [],
-            "pq_mae": [r.get(pq_mae_col) for r in rows] if pq_mae_col else [],
-            "pqai_mae": [r.get(pqai_mae_col) for r in rows] if pqai_mae_col else [],
-            "pq_error": [
-                (r.get(pq_err_col) or 0) * 100 if abs(r.get(pq_err_col) or 0) <= 1.5 else r.get(pq_err_col)
-                for r in rows
-            ] if pq_err_col else [],
-            "pqai_error": [
-                (r.get(pqai_err_col) or 0) * 100 if abs(r.get(pqai_err_col) or 0) <= 1.5 else r.get(pqai_err_col)
-                for r in rows
-            ] if pqai_err_col else [],
+            "pq_mean_error_pct": [_as_pct(r["pq_mean_error_pct"]) for r in rows],
+            "pqai_mean_error_pct": [_as_pct(r["pqai_mean_error_pct"]) for r in rows],
+            "pq_mape": [_as_pct(r["pq_mape"]) for r in rows],
+            "pqai_mape": [_as_pct(r["pqai_mape"]) for r in rows],
+            "units": [_as_num(r["units"]) for r in rows],
+            "pq_asp": [_as_num(r["pq_asp"]) for r in rows],
+            "pqai_asp": [_as_num(r["pqai_asp"]) for r in rows],
         }
 
     return jsonify({"file": data["file"], "kpis": kpis, "charts": charts})
@@ -325,9 +425,12 @@ PAGE_TEMPLATE = """
   .kpi-card.pqai { border-top-color: #70AD47; }
   .kpi-label { font-size: 11px; letter-spacing: .04em; color: #6b7280; text-transform: uppercase; font-weight: 700; }
   .kpi-value { font-size: 24px; font-weight: 700; margin-top: 4px; }
-  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; padding: 0 32px 32px; }
+  .charts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; padding: 0 32px 32px; }
+  @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
   .chart-card { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
   .chart-card h3 { margin: 0 0 10px; font-size: 15px; }
+  .chart-card canvas { margin-bottom: 16px; }
+  .chart-card canvas:last-child { margin-bottom: 0; }
   .meta { padding: 0 32px; font-size: 12px; color: #6b7280; }
   .error { padding: 24px 32px; color: #b91c1c; }
 </style>
@@ -390,31 +493,78 @@ async function loadData() {
   const chartContainer = document.getElementById('chartContainer');
   chartContainer.innerHTML = '';
   Object.entries(data.charts).forEach(([bucketName, c]) => {
-    const cardId = 'chart_' + bucketName.replace(/[^a-zA-Z0-9]/g, '_');
+    const safeId = bucketName.replace(/[^a-zA-Z0-9]/g, '_');
+    const cardIdPct = 'chart_pct_' + safeId;
+    const cardIdUnits = 'chart_units_' + safeId;
+    const cardIdAsp = 'chart_asp_' + safeId;
+
     const card = document.createElement('div');
     card.className = 'chart-card';
-    card.innerHTML = `<h3>${bucketName}</h3><canvas id="${cardId}"></canvas>`;
+    card.innerHTML = `<h3>${bucketName}</h3>
+      <canvas id="${cardIdPct}"></canvas>
+      <canvas id="${cardIdUnits}"></canvas>
+      <canvas id="${cardIdAsp}"></canvas>`;
     chartContainer.appendChild(card);
 
-    const ctx = document.getElementById(cardId).getContext('2d');
-    if (chartInstances[cardId]) chartInstances[cardId].destroy();
-    chartInstances[cardId] = new Chart(ctx, {
+    // Chart 1: percent metrics (Mean Error Pct + MAPE, PQ vs PQ_ai)
+    const ctxPct = document.getElementById(cardIdPct).getContext('2d');
+    if (chartInstances[cardIdPct]) chartInstances[cardIdPct].destroy();
+    chartInstances[cardIdPct] = new Chart(ctxPct, {
       data: {
         labels: c.labels,
         datasets: [
-          { type: 'bar', label: 'Units Sold', data: c.units, backgroundColor: '#d9d9d9', yAxisID: 'y', order: 3 },
-          { type: 'bar', label: 'PQ MAE', data: c.pq_mae, backgroundColor: '#4472C4', yAxisID: 'y', order: 2 },
-          { type: 'bar', label: 'PQ_ai MAE', data: c.pqai_mae, backgroundColor: '#70AD47', yAxisID: 'y', order: 2 },
-          { type: 'line', label: 'PQ Error %', data: c.pq_error, borderColor: '#4472C4', borderDash: [5,3], yAxisID: 'y1', order: 1, tension: 0.2 },
-          { type: 'line', label: 'PQ_ai Error %', data: c.pqai_error, borderColor: '#70AD47', borderDash: [5,3], yAxisID: 'y1', order: 1, tension: 0.2 },
+          { type: 'bar', label: 'PQ Mean Error Pct', data: c.pq_mean_error_pct, backgroundColor: '#4472C4' },
+          { type: 'bar', label: 'PQ_ai Mean Error Pct', data: c.pqai_mean_error_pct, backgroundColor: '#9DC3E6' },
+          { type: 'bar', label: 'PQ MAPE', data: c.pq_mape, backgroundColor: '#548235' },
+          { type: 'bar', label: 'PQ_ai MAPE', data: c.pqai_mape, backgroundColor: '#A9D18E' },
         ]
       },
       options: {
         responsive: true,
         interaction: { mode: 'index', intersect: false },
         scales: {
-          y: { position: 'left', title: { display: true, text: '$ (MAE) / Units' } },
-          y1: { position: 'right', title: { display: true, text: 'Error %' }, grid: { drawOnChartArea: false } },
+          y: { title: { display: true, text: 'Percent (%)' } },
+        }
+      }
+    });
+
+    // Chart 2: Units Sold (its own scale, no ASP mixed in)
+    const ctxUnits = document.getElementById(cardIdUnits).getContext('2d');
+    if (chartInstances[cardIdUnits]) chartInstances[cardIdUnits].destroy();
+    chartInstances[cardIdUnits] = new Chart(ctxUnits, {
+      type: 'bar',
+      data: {
+        labels: c.labels,
+        datasets: [
+          { label: 'Units Sold', data: c.units, backgroundColor: '#d9d9d9' },
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          y: { title: { display: true, text: 'Units' } },
+        }
+      }
+    });
+
+    // Chart 3: ASP - PQ vs PQ_ai (its own scale, no Units mixed in)
+    const ctxAsp = document.getElementById(cardIdAsp).getContext('2d');
+    if (chartInstances[cardIdAsp]) chartInstances[cardIdAsp].destroy();
+    chartInstances[cardIdAsp] = new Chart(ctxAsp, {
+      type: 'line',
+      data: {
+        labels: c.labels,
+        datasets: [
+          { label: 'ASP - PQ', data: c.pq_asp, borderColor: '#1F3864', tension: 0.2 },
+          { label: 'ASP - PQ_ai', data: c.pqai_asp, borderColor: '#375623', tension: 0.2 },
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          y: { title: { display: true, text: 'ASP ($)' } },
         }
       }
     });
