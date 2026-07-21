@@ -46,7 +46,7 @@ steps:
     - "--allow-unauthenticated"
 
 substitutions:
-  _SERVICE: proquote_reporting
+  _SERVICE: proquote-reporting
   _DASHBOARD_SERVICE: proquote-dashboard
   _REGION: us-west4
   _AR_REPO: proquote-reporting
