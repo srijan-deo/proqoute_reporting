@@ -1,6 +1,3 @@
-options:
-  logging: CLOUD_LOGGING_ONLY
-
 steps:
 - name: gcr.io/cloud-builders/docker
   args: ["build", "-t", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA}", "."]
@@ -8,6 +5,8 @@ steps:
 - name: gcr.io/cloud-builders/docker
   args: ["push", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA}"]
 
+# ── Cloud Run JOB: runs main_job.py (report generation), then exits.
+# Triggered on a schedule via Cloud Scheduler — not by HTTP traffic.
 - name: gcr.io/google.com/cloudsdktool/cloud-sdk
   entrypoint: gcloud
   args:
@@ -19,13 +18,40 @@ steps:
     - "--region=${_REGION}"
     - "--service-account=${_RUNTIME_SA}"
     - "--set-secrets=/secrets/reco-test-v2=reco-test-v2:latest,BE_API_SECRET=be-api:latest"
+    - "--set-env-vars=GCS_BUCKET_NAME=${_GCS_BUCKET},GCS_TEMPLATE_BLOB=${_GCS_TEMPLATE_BLOB},GCS_REPORTS_PREFIX=${_GCS_REPORTS_PREFIX}"
+    - "--command=python"
+    - "--args=main_job.py"
     - "--max-retries=0"
     - "--task-timeout=86400"
 
+# ── Cloud Run SERVICE: runs dashboard.py, stays listening for HTTP requests.
+# This is the "link" — deployed separately since a Service and a Job are
+# different Cloud Run resource types.
+- name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  entrypoint: gcloud
+  args:
+    - run
+    - deploy
+    - "${_DASHBOARD_SERVICE}"
+    - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA}"
+    - "--region=${_REGION}"
+    - "--service-account=${_RUNTIME_SA}"
+    - "--set-secrets=/secrets/reco-test-v2=reco-test-v2:latest,BE_API_SECRET=be-api:latest"
+    - "--set-env-vars=GCS_BUCKET_NAME=${_GCS_BUCKET},GCS_REPORTS_PREFIX=${_GCS_REPORTS_PREFIX}"
+    - "--command=python"
+    - "--args=dashboard.py"
+    - "--port=8080"
+    # Flip to --no-allow-unauthenticated + IAP once you've settled how you
+    # want to gate access (see your earlier IAP/Workforce Identity notes).
+    - "--allow-unauthenticated"
 
 substitutions:
   _SERVICE: proquote_reporting
+  _DASHBOARD_SERVICE: proquote-dashboard
   _REGION: us-west4
   _AR_REPO: proquote_reporting
   _IMAGE_NAME: proquote_reporting
   _RUNTIME_SA: cprtqa-stratanalytics-sp1-bq2@cprtqa-strategicanalytics-sp1.iam.gserviceaccount.com
+  _GCS_BUCKET: cprtqa-pqai-reporting
+  _GCS_TEMPLATE_BLOB: PQ_ai_Reporting_Reference_Outputs.xlsx
+  _GCS_REPORTS_PREFIX: reports/pq_ai_weekly_report

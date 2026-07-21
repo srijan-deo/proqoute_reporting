@@ -26,4 +26,4 @@ COPY . .
 ENV PORT=8080
 
 # Run your job
-CMD ["python", "main.py"]
+CMD ["python", "main_job.py"]

@@ -6,16 +6,10 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 import time
 import shutil
 import datetime
-import threading
-import webbrowser
 
 from report import run_report
-from dashboard import app as dashboard_app
 
 pwd = os.path.dirname(os.path.abspath(__file__))
-
-DASHBOARD_HOST = "127.0.0.1"
-DASHBOARD_PORT = 8080
 
 
 def resolve_key_path():
@@ -44,7 +38,13 @@ def log_time(step_name, start_time):
 
 
 def main():
-    print("🚀 Starting PQ.ai reporting pipeline...\n")
+    """
+    Job entrypoint — runs the BigQuery → Excel report and uploads it to GCS,
+    then exits. This is what the Cloud Run Job runs (triggered on a schedule
+    via Cloud Scheduler). No Flask/dashboard here — a Job is expected to
+    run to completion and stop, not stay listening.
+    """
+    print("🚀 Starting PQ.ai reporting job...\n")
     overall_start = time.time()
 
     # ───────────────────────────────────────────────────────────────
@@ -88,16 +88,9 @@ def main():
 
     print("🏁 ALL STEPS COMPLETED")
     log_time("TOTAL PIPELINE", overall_start)
-
-    # ───────────────────────────────────────────────────────────────
-    step = "STEP 3️⃣: Launch PQ.ai Dashboard"
-    print(f"\n{step}")
-    url = f"http://{DASHBOARD_HOST}:{DASHBOARD_PORT}"
-    print(f"🌐 Dashboard starting at {url} (Ctrl+C to stop)\n")
-
-    threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-
-    dashboard_app.run(host=DASHBOARD_HOST, port=DASHBOARD_PORT, debug=False)
+    # No Step 3 here — the Job process exits now. The dashboard is served
+    # separately by the Cloud Run Service running dashboard.py, which reads
+    # the report this job just uploaded to GCS.
 
 
 if __name__ == "__main__":
