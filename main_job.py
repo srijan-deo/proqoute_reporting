@@ -61,7 +61,7 @@ def main():
     current_run_date = datetime.date.today().isoformat()
 
     # GCS bucket where the template lives and finished reports get uploaded.
-    # Template is currently sitting at the bucket root (not under a
+    # Template is currently sitting at the bucket root (not under a #check
     # "templates/" prefix), so gcs_template_blob points straight at it.
     gcs_bucket = "cprtqa-pqai-reporting"
     gcs_template_blob = "PQ_ai_Reporting_Reference_Outputs.xlsx"
