@@ -1,0 +1,31 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+- name: gcr.io/cloud-builders/docker
+  args: ["build", "-t", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA}", "."]
+
+- name: gcr.io/cloud-builders/docker
+  args: ["push", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA}"]
+
+- name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  entrypoint: gcloud
+  args:
+    - run
+    - jobs
+    - deploy
+    - "${_SERVICE}"
+    - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA}"
+    - "--region=${_REGION}"
+    - "--service-account=${_RUNTIME_SA}"
+    - "--set-secrets=/secrets/reco-test-v2=reco-test-v2:latest,BE_API_SECRET=be-api:latest"
+    - "--max-retries=0"
+    - "--task-timeout=86400"
+
+
+substitutions:
+  _SERVICE: proquote_reporting
+  _REGION: us-west4
+  _AR_REPO: proquote_reporting
+  _IMAGE_NAME: proquote_reporting
+  _RUNTIME_SA: cprtqa-stratanalytics-sp1-bq2@cprtqa-strategicanalytics-sp1.iam.gserviceaccount.com
