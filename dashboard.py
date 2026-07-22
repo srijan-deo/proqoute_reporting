@@ -89,10 +89,10 @@ DETAIL_METRIC_COLUMNS = {
 
 KPI_CARD_SPECS = [
     ("Units Sold", "units sold", None),
-    ("PQ Coverage", "pq coverage", "pq"),
-    ("PQ_ai Coverage", "pq_ai coverage", "pqai"),
-    ("PQ Error %", "pq error", "pq"),
-    ("PQ_ai Error %", "pq_ai error", "pqai"),
+    ("ASP - PQ", "asp - pq cleansed", "pq"),
+    ("ASP - PQ_ai", "asp - pq_ai cleansed", "pqai"),
+    ("PQ Mean Error Pct", "pq mean error pct", "pq"),
+    ("PQ_ai Mean Error Pct", "pq_ai mean error pct", "pqai"),
     ("PQ MAE", "pq mae", "pq"),
     ("PQ_ai MAE", "pq_ai mae", "pqai"),
     ("PQ MAPE", "pq mape", "pq"),
