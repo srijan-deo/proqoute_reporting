@@ -4,8 +4,8 @@ PQ.ai Performance Dashboard — Flask app.
 Reads the latest workbook uploaded to GCS by report.py/main_job.py
 (gs://<bucket>/<reports_prefix>/*.xlsx) and serves an interactive dashboard:
 KPI cards (from the Summary sheet) plus, per bucket table (ACV_Bucket,
-Sale_Price_Bucket, Title_Type_Bucket, AutoGrade_Bucket, Loss_Type_Bucket,
-Lot_Type_Bucket), two side-by-side charts:
+Sale_Price_Bucket, Title_Type_Bucket, AutoGrade_Bucket/Make_Bucket,
+Loss_Type_Bucket, Lot_Type_Bucket), two side-by-side charts:
     1. Percent-metrics chart: PQ / PQ_ai Mean Error Pct and MAPE (Cleansed)
     2. Value-metrics chart: Units Sold and ASP - PQ / PQ_ai (Cleansed)
 
@@ -20,25 +20,24 @@ Config (env vars):
                           On Cloud Run, leave unset — Application Default
                           Credentials (the runtime service account) is used.
 
-ASSUMPTIONS (verify / adjust to match your actual "Summary (Sheet 1)" query
-columns — I only had report.py's formatting logic + your screenshots to infer
-these, not the real column names):
-    - Summary sheet has a "breakout" column with values matching the detail
-      sheet labels ("BluCar ex-TFSS", "Insurance + TFSS") and a "period"
-      column with values in {"Past Week", "Past Month", "Trailing 3 Months"}.
-    - Summary sheet has columns: Units Sold, PQ Coverage, PQ_ai Coverage,
-      PQ Error %, PQ_ai Error %, PQ MAE, PQ_ai MAE, PQ MAPE, PQ_ai MAPE.
-    - If your actual column names differ, tweak KPI_CARD_SPECS below —
-      the app does a case-insensitive substring match so minor differences
-      ("PQai" vs "PQ_ai") are usually fine, but wildly different names won't be.
-    - Detail-sheet "Cleansed" columns (per bucket sub-table) are:
-        "PQ Mean Error Pct - Cleansed", "PQ_ai Mean Error Pct - Cleansed",
-        "PQ MAPE - Cleansed", "PQ_ai MAPE - Cleansed",
-        "Units Sold", "ASP - PQ Cleansed", "ASP - PQ_ai Cleansed"
-      All %-type columns are assumed to be Excel percent-format fractions
-      (e.g. 0.029 -> 2.9%) and are scaled by x100 for display. Worth a
-      spot-check against a raw cell value the first time this runs against
-      real data.
+NOTES:
+    - Summary sheet ("PQ.ai Summary") has columns: breakout, period,
+      Units Sold, ASP - PQ Cleansed, ASP - PQ_ai Cleansed,
+      PQ Mean Error Pct - Cleansed, PQ_ai Mean Error Pct - Cleansed,
+      PQ MAE - Cleansed, PQ_ai MAE - Cleansed, PQ MAPE - Cleansed,
+      PQ_ai MAPE - Cleansed. KPI_CARD_SPECS below matches these via
+      case-insensitive substring match (see _find_col).
+    - Detail-sheet "Cleansed" columns (per bucket sub-table) are read from
+      FIXED column indices (DETAIL_METRIC_COLUMNS), not by header-text
+      scanning, because of interleaved hidden spacer/raw-data columns
+      (D, E, G, I, L, N).
+    - Bucket sub-tables within a detail sheet are located by matching known
+      bucket-header names in column B (KNOWN_BUCKET_NAMES), not by scanning
+      for blank separator rows — blank-row detection was fragile and could
+      silently drop a bucket table (e.g. Title_Type_Bucket) if a separator
+      row wasn't perfectly blank in both columns A and B.
+    - All %-type columns are assumed to be Excel percent-format fractions
+      (e.g. 0.029 -> 2.9%) and are scaled by x100 for display.
 """
 
 import os
@@ -69,6 +68,19 @@ DETAIL_SHEETS = {
 }
 PERIODS = ["Past Week", "Past Month", "Trailing 3 Months"]
 
+# Every bucket-table header name that can appear in column B of a detail
+# sheet. Used to locate sub-table boundaries directly, instead of relying on
+# blank-row detection (see module docstring).
+KNOWN_BUCKET_NAMES = {
+    "ACV_Bucket",
+    "Sale_Price_Bucket",
+    "Title_Type_Bucket",
+    "Make_Bucket",
+    "AutoGrade_Bucket",
+    "Loss_Type_Bucket",
+    "Lot_Type_Bucket",
+}
+
 # Fixed column layout for every bucket sub-table in the detail sheets, confirmed
 # directly against the source workbook (columns D, E, G, I, L, N are hidden
 # spacer/raw columns and are intentionally skipped). Column A = period label,
@@ -87,6 +99,10 @@ DETAIL_METRIC_COLUMNS = {
     "pqai_mape": 15,              # O — PQ_ai MAPE - Cleansed
 }
 
+# KPI cards read from the "PQ.ai Summary" sheet. Needles are matched
+# case-insensitively as substrings against the real header names (see
+# _find_col) — kept specific enough that e.g. "pq mae" doesn't also match
+# "pq_ai mae" (the "_ai" in between blocks that).
 KPI_CARD_SPECS = [
     ("Units Sold", "units sold", None),
     ("ASP - PQ", "asp - pq cleansed", "pq"),
@@ -206,47 +222,51 @@ def _parse_summary(ws):
 def _parse_detail_sheet(ws):
     """
     Reverse of _write_sub_table / _update_detail_sheet in report.py:
-    each sub-table is: header row (col B = bucket name), then for each
-    period: a period row (col A only), then data rows (col B = bucket
-    value, metric values at the FIXED columns in DETAIL_METRIC_COLUMNS).
-    A blank row separates tables.
+    each sub-table is: header row (col B = a KNOWN_BUCKET_NAMES value),
+    then for each period: a period row (col A only), then data rows
+    (col B = bucket value, metric values at the FIXED columns in
+    DETAIL_METRIC_COLUMNS).
 
-    NOTE: metric values are read by fixed column index (see
-    DETAIL_METRIC_COLUMNS), not by scanning/matching header text. The sheet
-    has hidden spacer/raw-data columns (D, E, G, I, L, N) interleaved with
-    the "Cleansed" columns we want — a contiguous header scan breaks on
-    those, so we go straight to the known-good column letters instead.
+    Table boundaries are located by finding every header row directly
+    (col A empty AND col B is a known bucket name), rather than by
+    scanning for blank separator rows. Blank-row detection is fragile:
+    if a separator row between two sub-tables isn't perfectly blank in
+    both columns (stray formatting/whitespace/merged-cell remnants), the
+    parser would fail to start a new table and would instead silently
+    fold the next table's rows into the previous one — which is how
+    Title_Type_Bucket previously went missing from the dashboard.
 
     Returns: dict of { bucket_col_name: { period: [ {bucket, <metric_key>: val, ...}, ... ] } }
     """
-    tables = {}
     max_row = ws.max_row
-    row_idx = 3  # data starts at row 3 in detail sheets
 
-    while row_idx <= max_row:
-        col_a = ws.cell(row_idx, 1).value
-        col_b = ws.cell(row_idx, 2).value
+    # Pass 1: find every real header row. Requiring col A to be empty
+    # guards against a data row whose bucket VALUE happens to match a
+    # bucket-name string being mistaken for a header.
+    header_rows = []
+    for r in range(3, max_row + 1):
+        col_a = ws.cell(r, 1).value
+        col_b = ws.cell(r, 2).value
+        if col_a is None and col_b is not None and str(col_b).strip() in KNOWN_BUCKET_NAMES:
+            header_rows.append((r, str(col_b).strip()))
 
-        if col_a is None and col_b is None:
-            row_idx += 1
-            continue
-
-        # Header row for a new sub-table: col B holds the bucket label
-        # (e.g. "ACV_Bucket"). No need to scan metric headers — columns
-        # are fixed via DETAIL_METRIC_COLUMNS.
-        bucket_col = col_b
-        row_idx += 1
+    # Pass 2: read each table's rows between its header and the next header
+    # (or end of sheet for the last table).
+    tables = {}
+    for i, (start_row, bucket_col) in enumerate(header_rows):
+        end_row = header_rows[i + 1][0] - 1 if i + 1 < len(header_rows) else max_row
 
         table_data = {p: [] for p in PERIODS}
         current_period = None
+        row_idx = start_row + 1
 
-        while row_idx <= max_row:
+        while row_idx <= end_row:
             col_a = ws.cell(row_idx, 1).value
             col_b = ws.cell(row_idx, 2).value
 
             if col_a is None and col_b is None:
                 row_idx += 1
-                break  # blank gap -> next sub-table
+                continue
 
             if col_a is not None and col_b is None:
                 current_period = col_a
