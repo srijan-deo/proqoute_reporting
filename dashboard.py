@@ -514,27 +514,47 @@ async function loadData() {
   chartContainer.innerHTML = '';
   Object.entries(data.charts).forEach(([bucketName, c]) => {
     const safeId = bucketName.replace(/[^a-zA-Z0-9]/g, '_');
-    const cardIdPct = 'chart_pct_' + safeId;
+    const cardIdMeanError = 'chart_meanerror_' + safeId;
+    const cardIdMape = 'chart_mape_' + safeId;
     const cardIdUnits = 'chart_units_' + safeId;
     const cardIdAsp = 'chart_asp_' + safeId;
 
     const card = document.createElement('div');
     card.className = 'chart-card';
     card.innerHTML = `<h3>${bucketName}</h3>
-      <canvas id="${cardIdPct}"></canvas>
+      <canvas id="${cardIdMeanError}"></canvas>
+      <canvas id="${cardIdMape}"></canvas>
       <canvas id="${cardIdUnits}"></canvas>
       <canvas id="${cardIdAsp}"></canvas>`;
     chartContainer.appendChild(card);
 
-    // Chart 1: percent metrics (Mean Error Pct + MAPE, PQ vs PQ_ai)
-    const ctxPct = document.getElementById(cardIdPct).getContext('2d');
-    if (chartInstances[cardIdPct]) chartInstances[cardIdPct].destroy();
-    chartInstances[cardIdPct] = new Chart(ctxPct, {
+    // Chart 1a: Mean Error Pct only (PQ vs PQ_ai) — dark blue / light blue
+    const ctxMeanError = document.getElementById(cardIdMeanError).getContext('2d');
+    if (chartInstances[cardIdMeanError]) chartInstances[cardIdMeanError].destroy();
+    chartInstances[cardIdMeanError] = new Chart(ctxMeanError, {
       data: {
         labels: c.labels,
         datasets: [
           { type: 'bar', label: 'PQ Mean Error Pct', data: c.pq_mean_error_pct, backgroundColor: '#4472C4' },
           { type: 'bar', label: 'PQ_ai Mean Error Pct', data: c.pqai_mean_error_pct, backgroundColor: '#9DC3E6' },
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          y: { title: { display: true, text: 'Percent (%)' } },
+        }
+      }
+    });
+
+    // Chart 1b: MAPE only (PQ vs PQ_ai) — dark green / light green
+    const ctxMape = document.getElementById(cardIdMape).getContext('2d');
+    if (chartInstances[cardIdMape]) chartInstances[cardIdMape].destroy();
+    chartInstances[cardIdMape] = new Chart(ctxMape, {
+      data: {
+        labels: c.labels,
+        datasets: [
           { type: 'bar', label: 'PQ MAPE', data: c.pq_mape, backgroundColor: '#548235' },
           { type: 'bar', label: 'PQ_ai MAPE', data: c.pqai_mape, backgroundColor: '#A9D18E' },
         ]
